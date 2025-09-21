@@ -109,31 +109,6 @@ class Conv(nn.Module):
     def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
         return nn.Conv(self.features, self.kernel_size, self.strides, self.padding)(array)
 
-
-class Residual(nn.Module):
-    """Residual module that adds the output of a sub-module to the input, forming a skip connection.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, ...), where B is the batch size.
-    
-    Updated args:
-      - "array": jnp.ndarray of the same shape as input, computed as module(args) + input array.
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> def some_module(array):
-      ...     return array * 2
-      >>> array = jnp.ones((2, 10))  # input shape: (2,10)
-      >>> out = Residual(module=some_module)(array)
-      # Updated args: {"array": jnp.ndarray of shape (2, 10)}
-    """
-    module: ModuleType
-
-    @nn.compact
-    def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
-        return self.module(array) + array
-
-
 class ScaleConv(nn.Module):
     """ScaleConv module that performs image resizing before applying a convolution.
     
@@ -182,6 +157,21 @@ class ScaleConv(nn.Module):
                         )
         return Conv(self.features)(array)
 
+class RMSNorm(nn.Module):
+    eps: float = 1e-8
+    param_dtype: Optional[jnp.dtype] = None
+
+    @nn.compact
+    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
+        features = array.shape[-1]
+        scale = self.param(
+            "scale",
+            nn.initializers.ones,
+            (features,),
+            array.dtype,
+        )
+        rms = jnp.sqrt(jnp.mean(jnp.square(array), axis=-1, keepdims=True) + self.eps)
+        return (array / rms) * scale
 
 class Norm(nn.Module):
     """Normalization module that normalizes inputs based on the specified type.
@@ -198,7 +188,7 @@ class Norm(nn.Module):
       >>> normalized = Norm(type="layer")(args)
       # Updated output: jnp.ndarray of shape (2,10)
     """
-    type: Literal["layer", "batch", "group"] = "layer"
+    type: Literal["layer", "batch", "group", "rms"] = "rms"
 
     @nn.compact
     def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
@@ -206,8 +196,10 @@ class Norm(nn.Module):
             norm_fn = nn.BatchNorm()
         elif self.type == "group":
             norm_fn = nn.GroupNorm()
-        else:
+        elif self.type == "layer":
             norm_fn = nn.LayerNorm()
+        else:
+            norm_fn = RMSNorm()
         return norm_fn(array)
 
 
@@ -342,24 +334,6 @@ class PatchEmbedding(nn.Module):
         return projected
     
 class Attention(nn.Module):
-    """SequenceSelfAttention module that applies multi-head self-attention to sequence data.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, N, C), where B is batch size,
-              N is sequence length, and C is feature dimension.
-    
-    Processing steps:
-      1. Applies multi-head self-attention using nn.SelfAttention, resulting in an output of the same shape (B, N, C).
-    
-    Updated args:
-      - "array": jnp.ndarray with shape (B, N, C) after self-attention.
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 10, 64))}  # input shape: (2,10,64)
-      >>> out = SequenceSelfAttention(num_heads=8)(args)
-      # Updated args: {"array": jnp.ndarray of shape (2,10,64)}
-    """
     num_heads: int
     hidden_dim: Optional[int] = None
     dropout_rate: float = 0.0
@@ -367,10 +341,11 @@ class Attention(nn.Module):
 
     @nn.compact
     def __call__(self, array : jnp.ndarray, kv : Optional[jnp.ndarray] = None, apply_bias : Optional[jnp.ndarray] = None) -> jnp.ndarray:
+        features = array.shape[-1]
         if not self.hidden_dim:
-            hidden_dim = array.shape[-1] * 4
+            hidden_dim = array.shape[-1] * self.num_heads
         else:
-            hidden_dim = self.hidden_dim
+            hidden_dim = self.hidden_dim * self.num_heads
 
         if kv:
             q = Linear(hidden_dim)(array)
@@ -388,5 +363,19 @@ class Attention(nn.Module):
         out = jnp.einsum("b h i j, b h j d -> b h i d", attn_weights, v)
         out = rearrange(out, "b h n d -> b n (h d)")
 
-        out = Linear(q.shape[-1])(out)
+        out = Linear(features)(out)
         return out
+    
+class AttentionPool(nn.Module):
+    num_heads: int = 8
+
+    @nn.compact
+    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
+        dim = array.shape[-1]
+        q = self.param("query", nn.initializers.normal(stddev=0.02),
+                       (1, 1, dim))
+        q = jnp.repeat(q, repeats=array.shape[0], axis=0)
+        array = Linear(array.shape[-1] * self.num_heads)(array)
+        array = nn.MultiHeadDotProductAttention(num_heads=self.num_heads,
+                                            dtype=array.dtype)(q, array, array)
+        return array[:, 0, :]
