@@ -340,3 +340,53 @@ class PatchEmbedding(nn.Module):
             projected = jnp.concatenate([jnp.tile(cls, (B, 1, 1)), projected], axis=1)
 
         return projected
+    
+class Attention(nn.Module):
+    """SequenceSelfAttention module that applies multi-head self-attention to sequence data.
+    
+    Inputs:
+      - args: dict with key "array" containing a jnp.ndarray of shape (B, N, C), where B is batch size,
+              N is sequence length, and C is feature dimension.
+    
+    Processing steps:
+      1. Applies multi-head self-attention using nn.SelfAttention, resulting in an output of the same shape (B, N, C).
+    
+    Updated args:
+      - "array": jnp.ndarray with shape (B, N, C) after self-attention.
+    
+    Example:
+      >>> import jax.numpy as jnp
+      >>> args = {"array": jnp.ones((2, 10, 64))}  # input shape: (2,10,64)
+      >>> out = SequenceSelfAttention(num_heads=8)(args)
+      # Updated args: {"array": jnp.ndarray of shape (2,10,64)}
+    """
+    num_heads: int
+    hidden_dim: Optional[int] = None
+    dropout_rate: float = 0.0
+    deterministic: bool = True
+
+    @nn.compact
+    def __call__(self, array : jnp.ndarray, kv : Optional[jnp.ndarray] = None, apply_bias : Optional[jnp.ndarray] = None) -> jnp.ndarray:
+        if not self.hidden_dim:
+            hidden_dim = array.shape[-1] * 4
+        else:
+            hidden_dim = self.hidden_dim
+
+        if kv:
+            q = Linear(hidden_dim)(array)
+            k, v = jnp.split(Linear(hidden_dim * 2)(kv), 2, axis=-1)
+        else:
+            q, k, v = jnp.split(Linear(hidden_dim * 3)(array), 3, axis=-1)
+
+        q, k, v = map(lambda a: rearrange(a, "b n (h d) -> b h n d", h=self.num_heads), (q, k, v))
+        attn_weights = jnp.einsum("b h i d, b h j d -> b h i j", q, k) / jnp.sqrt(q.shape[-1])
+        if apply_bias:
+            attn_weights = attn_weights + apply_bias
+        attn_weights = nn.softmax(attn_weights, axis=-1)
+
+        attn_weights = nn.Dropout(rate=self.dropout_rate)(attn_weights, deterministic=self.deterministic)
+        out = jnp.einsum("b h i j, b h j d -> b h i d", attn_weights, v)
+        out = rearrange(out, "b h n d -> b n (h d)")
+
+        out = Linear(q.shape[-1])(out)
+        return out
