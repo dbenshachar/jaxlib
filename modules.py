@@ -3,14 +3,15 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 from einops.einops import rearrange
-from typing import Optional, Callable, List, TypeAlias, Union, Tuple, Literal, Any, cast
+from typing import Optional, Callable, List, TypeAlias, Union, Tuple, Literal, Any, Dict, cast
 
 ModuleType : TypeAlias = Union[nn.Module, Callable[..., jnp.ndarray]]
 ModuleList : TypeAlias = List[ModuleType]
+Args : TypeAlias = Dict[str, jnp.ndarray]
 
 class Identity(nn.Module):
-    def __call__(self, array : jnp.ndarray, *args : Any) -> jnp.ndarray:
-        return array
+    def __call__(self, args : Args) -> jnp.ndarray:
+        return args["array"]
 
 
 class Linear(nn.Module):
@@ -18,8 +19,8 @@ class Linear(nn.Module):
     bias : bool = False
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
-        return nn.Dense(features=self.features, use_bias=self.bias)(array)
+    def __call__(self, args : Args) -> jnp.ndarray:
+        return nn.Dense(features=self.features, use_bias=self.bias)(args["array"])
     
 class MLP(nn.Module):
     features : int
@@ -31,10 +32,10 @@ class MLP(nn.Module):
         self.hidden = self.hidden_features if self.hidden_features else self.features
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
-        array = Linear(features=self.hidden, bias=self.bias)(array)
+    def __call__(self, args : Args) -> jnp.ndarray:
+        array = Linear(features=self.hidden, bias=self.bias)(args)
         array = self.activation(array)
-        array = Linear(features=self.features, bias=self.bias)(array)
+        array = Linear(features=self.features, bias=self.bias)(args)
         return array
     
 class Conv(nn.Module):
@@ -44,28 +45,29 @@ class Conv(nn.Module):
     padding : Literal["SAME", "VALID"] = "SAME"
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
-        return nn.Conv(self.features, self.kernel_size, self.strides, self.padding)(array)
+    def __call__(self, args : Args) -> jnp.ndarray:
+        return nn.Conv(self.features, self.kernel_size, self.strides, self.padding)(args["array"])
     
 class Residual(nn.Module):
     module : ModuleType
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray, *args : Any, **kwargs : Any) -> jnp.ndarray:
-        return self.module(array, *args, **kwargs) + array
+    def __call__(self, args : Args) -> jnp.ndarray:
+        return self.module(args) + args["array"]
     
 class ScaleConv(nn.Module):
     features: int
     scale: float
-    method: Literal["nearest", "linear", "cubic", "lanczos3", "lanczos5"]
+    method: Literal["nearest", "lanczos3", "lanczos5"]
     antialias: bool = True
 
     def setup(self):
         self._scale : Tuple[float, float] = (self.scale, self.scale)
 
     @nn.compact
-    def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, args : Args) -> jnp.ndarray:
         scale_height, scale_width = self._scale
+        array = args["array"]
         batch, height, width, channel = array.shape
 
         if scale_height != 1.0 or scale_width != 1.0:
@@ -82,19 +84,32 @@ class ScaleConv(nn.Module):
                             antialias=self.antialias)
                         )
 
-        return Conv(self.features)(array)
+        return Conv(self.features)(args)
+    
+class Norm(nn.Module):
+    type : Literal["layer", "batch", "group"] = "layer"
+
+    @nn.compact
+    def __call__(self, args : Args) -> jnp.ndarray:
+        if self.norm == "batch":
+            norm_fn = nn.BatchNorm()
+        elif self.norm == "group":
+            norm_fn = nn.GroupNorm()
+        else:
+            norm_fn = nn.LayerNorm()
+        return norm_fn(args["array"])
     
 class ConvBlock(nn.Module):
     features : int
-    norm : ModuleType = nn.LayerNorm()
+    norm_type : Literal["layer", "batch", "group"] = "layer"
     activation : ModuleType = nn.relu
     
     @nn.compact
-    def __call__(self, array : jnp.ndarray, scale_shift : Optional[List[jnp.ndarray]] = None) -> jnp.ndarray:
-        array = Conv(self.features)(array)
-        array = self.norm(array)
-        if scale_shift:
-            scale, shift = scale_shift
+    def __call__(self, args : Args) -> jnp.ndarray:
+        array = Conv(self.features)(args)
+        array = Norm(self.norm_type)(args)
+        if args.get("scale") and args.get("shift"):
+            scale, shift = args["scale"], args["shift"]
             array = array * (scale + 1) + shift
 
         array = self.activation(array)
@@ -106,14 +121,15 @@ class TimeShiftBlock(nn.Module):
     hidden_features : Optional[int] = None
     bias : bool = False
     activation : ModuleType = nn.relu
-    norm : ModuleType = nn.LayerNorm()
+    norm_type : Literal["layer", "batch", "group"] = "layer"
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray, embedding : Optional[jnp.ndarray] = None):
-        if self.mlp and embedding:
-            time_emb =  MLP(self.features, self.hidden_features, self.bias, self.activation)(embedding)
+    def __call__(self, args : Args):
+        if args.get("embedding"):
+            time_emb =  MLP(self.features * 2, self.hidden_features, self.bias, self.activation)({"array" : args["embedding"]})
             time_emb = rearrange(time_emb, "b c -> b c 1 1")
-            scale_shift = jnp.split(time_emb, 2, axis=1)
-            array = ConvBlock(self.features, self.norm, self.activation)(array, scale_shift)
-        array = ConvBlock(self.features, self.norm, self.activation)(array)
+            scale, shift = jnp.split(time_emb, 2, axis=1)
+            args["scale"], args["shift"] = scale, shift
+            array = ConvBlock(self.features, self.norm_type, self.activation)(args)
+        array = ConvBlock(self.features, self.norm_type, self.activation)(args)
         return array

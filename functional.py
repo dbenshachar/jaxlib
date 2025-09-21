@@ -25,4 +25,4 @@ def make_optimizer(optimizer_type : Literal["adam", "adamw", "sgd"], decay_type 
 
 def create_train_state(model : nn.Module, optimizer : optax.GradientTransformationExtraArgs, shape : List[int], rng : int = 42) -> train_state.TrainState:
     params = model.init(jax.random.PRNGKey(rng), jnp.ones(shape))["params"]
-    return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=optimizer, opt_state=optimizer.init(params))
+    return train_state.TrainState(0, apply_fn=model.apply, params=params, tx=optimizer, opt_state=optimizer.init(params))
