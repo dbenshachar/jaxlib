@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import flax.linen as nn
 
 from einops.einops import rearrange
-from typing import Optional, Callable, List, TypeAlias, Union, Tuple, Literal, Any, Dict, cast
+from typing import Optional, Callable, List, Sequence, TypeAlias, Union, Tuple, Literal, Any, Dict, cast
 
 ModuleType : TypeAlias = Union[nn.Module, Callable[..., jnp.ndarray]]
 ModuleList : TypeAlias = List[ModuleType]
@@ -135,3 +135,34 @@ class TimeShiftBlock(nn.Module):
             array = ConvBlock(self.features, self.norm_type, self.activation)(args, scale_key=scale_key, shift_key=shift_key)
         array = ConvBlock(self.features, self.norm_type, self.activation)(args)
         return array
+    
+class PatchEmbedding(nn.Module):
+    features: int
+    patch_size: Sequence[int]
+    bias: bool = True
+    add_cls_token: bool = True
+
+    def setup(self):
+        if isinstance(self.patch_size, int):
+            self.patch_size = (self.patch_size, self.patch_size)
+
+    @nn.compact
+    def __call__(self, args: dict, key: str = "array") -> dict:
+        key = key or self.key
+        ph, pw = self.patch_size
+        args[key] = nn.Conv(
+            features=self.features,
+            kernel_size=(ph, pw),
+            strides=(ph, pw),
+            use_bias=self.bias,
+            name="proj",
+        )(args[key])
+
+        B, H, W, D = args[key].shape
+        args[key] = jnp.reshape(args[key], (B, H * W, D))
+
+        if self.add_cls_token:
+            cls = self.param("cls", nn.initializers.zeros, (1, 1, D))
+            args[key] = jnp.concatenate([jnp.tile(cls, (B, 1, 1)), args[key]], axis=1)
+
+        return args
