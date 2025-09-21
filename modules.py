@@ -69,19 +69,17 @@ class MLP(nn.Module):
       >>> out = MLP(features=5, hidden_features=7)(args)
       # Updated args: {"array": jnp.ndarray of shape (2,5)}
     """
-    features: int
     hidden_features: Optional[int] = None
     bias: bool = False
     activation: ModuleType = nn.relu
 
-    def setup(self):
-        self.hidden = self.hidden_features if self.hidden_features else self.features
-
     @nn.compact
     def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
-        array = Linear(features=self.hidden, bias=self.bias)(array)
+        dim = array.shape[-1]
+        hidden = self.hidden_features if self.hidden_features else dim * 4
+        array = Linear(features=hidden, bias=self.bias)(array)
         array = self.activation(array)
-        array = Linear(features=self.features, bias=self.bias)(array)
+        array = Linear(features=dim, bias=self.bias)(array)
         return array
 
 
@@ -272,7 +270,7 @@ class TimeShiftBlock(nn.Module):
     @nn.compact
     def __call__(self, array: jnp.ndarray, embedding: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         if embedding is not None:
-            time_emb = MLP(self.features * 2, self.hidden_features, self.bias, self.activation)(embedding)
+            time_emb = MLP(self.hidden_features, self.bias, self.activation)(embedding)
             time_emb = rearrange(time_emb, "b c -> b c 1 1")
             scale, shift = jnp.split(embedding, 2, axis=1)
             array = ConvBlock(self.features, self.norm_type, self.activation)(array, scale=scale, shift=shift)
@@ -305,17 +303,18 @@ class PatchEmbedding(nn.Module):
       # Updated args: {"array": jnp.ndarray of shape (2, 1 + (32/4)*(32/4), 64) if add_cls_token is True}
     """
     features: int
-    patch_size: Sequence[int]
+    patch_size: Union[Tuple[int, int], int]
     bias: bool = True
     add_cls_token: bool = True
 
-    def setup(self):
-        if isinstance(self.patch_size, int):
-            self.patch_size = (self.patch_size, self.patch_size)
-
     @nn.compact
     def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
-        ph, pw = self.patch_size
+        if isinstance(self.patch_size, int):
+            patch_size = (self.patch_size, self.patch_size)
+        else:
+            patch_size = self.patch_size
+
+        ph, pw = patch_size
         projected = nn.Conv(
             features=self.features,
             kernel_size=(ph, pw),

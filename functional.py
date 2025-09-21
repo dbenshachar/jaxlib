@@ -30,21 +30,24 @@ def create_train_state(model : nn.Module, optimizer : optax.GradientTransformati
     params = model.init(jax.random.PRNGKey(rng), sample_input)["params"]
     return train_state.TrainState(0, apply_fn=model.apply, params=params, tx=optimizer, opt_state=optimizer.init(params))
 
+
+result_key = "result"
+
 def compute_metrics(logits: jnp.ndarray, labels: jnp.ndarray, loss: Optional[float] = None) -> Dict[str, float]:
     res = {}
     if loss is not None:
         res["loss"] = loss
     return res
 
-def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None, key : str = "array") -> Tuple[jnp.ndarray, jnp.ndarray]:
+def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
     if rng is None:
         logits = apply_fn({"params": params}, batch)
     else:
         logits = apply_fn({"params": params}, batch, rngs={"dropout": rng})
-    return logits[key], batch["target"]
+    return logits[result_key], batch["target"]
 
 @jax.jit
-def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], loss_calc : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray], rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
+def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
     def loss_fn(p) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         logits, target = forward(p, state.apply_fn, batch, rng=rng)
         loss = loss_calc(logits, target)
@@ -54,6 +57,9 @@ def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], los
     state = state.apply_gradients(grads=grads)
     metrics = compute_metrics(logits, target, loss=loss)
     return state, metrics
+
+def loss_calc(logits : jnp.ndarray, target : jnp.ndarray) -> jnp.ndarray:
+    return (logits - target).mean()
 
 @jax.jit
 def eval_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray]):

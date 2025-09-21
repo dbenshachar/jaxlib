@@ -3,17 +3,20 @@ from modules import *
 
 class VisionTransformer(nn.Module):
     hidden_dim : int = 1024
-    num_heads = 16
+    num_heads : int = 16
     num_layers : int = 6
     num_patches : int = 8
     use_cls : bool = True
     pool : bool = False
     num_classes : int =  1
     activation : ModuleType = nn.gelu
+    img_key : str = "array"
+    return_key : str = "result"
 
+    @nn.compact
     def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        image = batch["array"]
-        patch_size = (image.shape[-1]//self.num_patches, image.shape[-2]//self.num_patches)
+        image = batch[self.img_key]
+        patch_size = (image.shape[-2]//self.num_patches, image.shape[-3]//self.num_patches)
 
         image = PatchEmbedding(self.hidden_dim, patch_size=patch_size, add_cls_token=self.use_cls)(image)
         for _ in range(self.num_layers):
@@ -24,8 +27,6 @@ class VisionTransformer(nn.Module):
 
         if self.pool:
             if self.use_cls:
-                image = image[:, 0]
-            else:
                 image = image.mean(axis=1)
             image = Linear(self.num_classes)(image)
-        return {"result" : image}
+        return {self.return_key : image}
