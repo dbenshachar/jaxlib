@@ -7,7 +7,7 @@ from flax.training import train_state
 import optax
 import einops
 
-import torch.utils.data
+from torch.utils.data import DataLoader
 
 def make_optimizer(optimizer_type : Literal["adam", "adamw", "sgd"], decay_type : Literal["constant", "decay"],
                 lr : float = 3e-4, transition_steps : int = 2000, decay_rate : float = 0.95,
@@ -60,7 +60,7 @@ def eval_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray]):
     logits, target = forward(state.params, state.apply_fn, batch, rng=None)
     return compute_metrics(logits, target)
 
-def train(state : train_state.TrainState, train_loader : data.DataLoader, epochs : int = 20, num_logs : int = 20, rng : jnp.ndarray = jax.random.PRNGKey(42)):
+def train(state : train_state.TrainState, train_loader : DataLoader, epochs : int = 20, num_logs : int = 20, rng : jnp.ndarray = jax.random.PRNGKey(42)):
     losses = []
     log_every = len(train_loader) // num_logs
 
