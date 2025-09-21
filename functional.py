@@ -44,10 +44,10 @@ def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None, key : str 
     return logits[key], batch["target"]
 
 @jax.jit
-def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
+def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], loss_calc : Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray], rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
     def loss_fn(p) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
         logits, target = forward(p, state.apply_fn, batch, rng=rng)
-        loss = optax.softmax_cross_entropy_with_integer_labels(logits, target).mean()
+        loss = loss_calc(logits, target)
         return loss, (logits, target)
 
     (loss, (logits, target)), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
