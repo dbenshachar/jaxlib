@@ -9,41 +9,11 @@ ModuleType : TypeAlias = Union[nn.Module, Callable[..., jnp.ndarray]]
 ModuleList : TypeAlias = List[ModuleType]
 
 class Identity(nn.Module):
-    """
-    Identity module.
-    
-    Inputs:
-    - args: dict, must contain key "array" with jnp.ndarray of shape (B, ...).
-    
-    Output:
-    - Returns the same args dictionary with no modifications.
-    
-    Example:
-    >>> import jax.numpy as jnp
-    >>> args = {"array": jnp.array([[1,2],[3,4]])}  # shape (2,2)
-    >>> out = Identity()(args)
-    # Updated args: {"array": jnp.ndarray of shape (2,2)}
-    """
-
     def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
         return array
 
 
 class Linear(nn.Module):
-    """Linear layer applying a Dense transformation.
-    
-    Inputs:
-    - args: dict with key "array" containing a jnp.ndarray of shape (B, *, F_in) where F_in is the input feature dimension.
-    
-    Updated args:
-    - "array": jnp.ndarray of shape (B, *, features), where features is set by the module attribute.
-    
-    Example:
-    >>> import jax.numpy as jnp
-    >>> args = {"array": jnp.ones((2, 10))}  # shape (2,10)
-    >>> out = Linear(features=5, bias=True)(args)
-    # Updated args: {"array": jnp.ndarray of shape (2, 5)}
-    """
     features: int
     bias: bool = False
 
@@ -86,53 +56,23 @@ class DropPath(nn.Module):
         return array * mask / keep
 
 class MLP(nn.Module):
-    """
-    MLP module: A multi-layer perceptron using two Linear layers with an activation function between them.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, F_in), where B is the batch size and F_in is the input feature dimension.
-    
-    Updated args:
-      - "array": After the first Linear layer, the shape becomes (B, hidden) where hidden = hidden_features (or features if not provided).
-                   After activation and the second Linear layer, the shape becomes (B, features).
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 10))}  # input shape: (2,10)
-      >>> out = MLP(features=5, hidden_features=7)(args)
-      # Updated args: {"array": jnp.ndarray of shape (2,5)}
-    """
     hidden_features: Optional[int] = None
     bias: bool = False
     activation: ModuleType = GeGLU()
     dropout_rate : float = 0.1
 
     @nn.compact
-    def __call__(self, array: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, array: jnp.ndarray, deterministic : bool = True) -> jnp.ndarray:
         dim = array.shape[-1]
         hidden = self.hidden_features if self.hidden_features else dim * 4
         array = Linear(features=hidden, bias=self.bias)(array)
         array = self.activation(array)
-        array = nn.Dropout(self.dropout_rate)(array)
+        array = nn.Dropout(self.dropout_rate)(array, deterministic=deterministic)
         array = Linear(features=dim, bias=self.bias)(array)
         return array
 
 
 class Conv(nn.Module):
-    """Conv layer applying a convolution operation.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, H, W, C_in), where B is batch size, H is height, W is width, and C_in is the number of input channels.
-    
-    Updated args:
-      - "array": jnp.ndarray with shape (B, H_out, W_out, features), where H_out and W_out depend on the kernel size, strides and padding.
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 28, 28, 3))}  # input shape: (2,28,28,3)
-      >>> out = Conv(features=16, kernel_size=(3,3), strides=(1,1))(args)
-      # Updated args: {"array": jnp.ndarray of shape (2, H_out, W_out, 16)}
-    """
     features: int
     kernel_size: Union[int, Tuple[int, int]] = (3, 3)
     strides: Union[int, Tuple[int, int]] = (1, 1)
@@ -143,26 +83,6 @@ class Conv(nn.Module):
         return nn.Conv(self.features, self.kernel_size, self.strides, self.padding)(array)
 
 class ScaleConv(nn.Module):
-    """ScaleConv module that performs image resizing before applying a convolution.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, H, W, C_in), where
-              B is the batch size, H height, W width, and C_in number of input channels.
-    
-    Processing steps:
-      1. Resizes the input array by a given scale factor along its height and width.
-      2. Applies a convolution (using Conv) that updates the shape to (B, H_out, W_out, features).
-    
-    Updated args:
-      - "array": jnp.ndarray updated after convolution, with shape (B, H_out, W_out, features),
-                 where H_out and W_out are computed as H * scale and W * scale (if scaling occurs).
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 32, 32, 3))}  # input shape: (2,32,32,3)
-      >>> out = ScaleConv(features=16, scale=0.5, method="lanczos3", antialias=True)(args)
-      # Updated args: {"array": jnp.ndarray of shape (2, H_out, W_out, 16)}
-    """
     features: int
     scale: float
     method: Literal["nearest", "lanczos3", "lanczos5"]
@@ -207,20 +127,6 @@ class RMSNorm(nn.Module):
         return (array / rms) * scale
 
 class Norm(nn.Module):
-    """Normalization module that normalizes inputs based on the specified type.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, ...), where B is the batch size.
-    
-    Updated args:
-      - Returns a normalized jnp.ndarray with the same shape as the input.
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 10))}  # input shape: (2,10)
-      >>> normalized = Norm(type="layer")(args)
-      # Updated output: jnp.ndarray of shape (2,10)
-    """
     type: Literal["layer", "batch", "group", "rms"] = "rms"
 
     @nn.compact
@@ -234,42 +140,6 @@ class Norm(nn.Module):
         else:
             norm_fn = RMSNorm()
         return norm_fn(array)
-
-
-class ConvBlock(nn.Module):
-    """ConvBlock module that applies convolution, normalization, optional scaling and shifting, and an activation function.
-    
-    Inputs:
-      - args: dict with key "array" containing a jnp.ndarray of shape (B, H, W, C_in), where B is the batch size, H is height, W is width, and C_in is the number of input channels.
-      - Additionally, may contain keys "scale" and "shift" with jnp.ndarray values to adjust the output if provided.
-    
-    Processing steps:
-      1. Applies a convolution via the Conv module resulting in an output with shape modified according to convolution parameters.
-      2. Applies a normalization (LayerNorm, BatchNorm, or GroupNorm) via the Norm module.
-      3. If both "scale" and "shift" are provided in args, computes: output = normalized * (scale + 1) + shift.
-      4. Applies the activation function.
-    
-    Returns:
-      - A jnp.ndarray resulting from the activation, with shape determined by the convolution and normalization operations.
-    
-    Example:
-      >>> import jax.numpy as jnp
-      >>> args = {"array": jnp.ones((2, 28, 28, 3)), "scale": jnp.ones((2,1,1,3)), "shift": jnp.zeros((2,1,1,3))}  # input shape: (2,28,28,3)
-      >>> out = ConvBlock(features=16, norm_type="layer", activation=jax.nn.gelu)(args)
-      # Updated args: {"array": jnp.ndarray of shape (2, H_out, W_out, 16)}
-    """
-    features: int
-    norm_type: Literal["layer", "batch", "group"] = "layer"
-    activation: ModuleType = GeGLU()
-
-    @nn.compact
-    def __call__(self, array: jnp.ndarray, scale: Optional[jnp.ndarray] = None, shift: Optional[jnp.ndarray] = None) -> jnp.ndarray:
-        array = Conv(self.features)(array)
-        array = Norm(self.norm_type)(array)
-        if scale is not None and shift is not None:
-            array = array * (scale + 1) + shift
-        return self.activation(array)
-
 
 class PatchEmbedding(nn.Module):
     """PatchEmbedding module that converts an image into a sequence of patches.
@@ -329,13 +199,12 @@ class Attention(nn.Module):
     num_heads: int
     hidden_dim: Optional[int] = None
     dropout_rate: float = 0.0
-    deterministic: bool = True
     qkv_bias : bool = True
     rotary_base : int = 1_000
     cls_index : int = 0
 
     @nn.compact
-    def __call__(self, array : jnp.ndarray, kv : Optional[jnp.ndarray] = None, apply_bias : Optional[jnp.ndarray] = None) -> jnp.ndarray:
+    def __call__(self, array : jnp.ndarray, kv : Optional[jnp.ndarray] = None, apply_bias : Optional[jnp.ndarray] = None, deterministic : bool = False) -> jnp.ndarray:
         features = array.shape[-1]
         if not self.hidden_dim:
             hidden_dim = array.shape[-1] * self.num_heads
@@ -348,7 +217,7 @@ class Attention(nn.Module):
         else:
             q, k, v = jnp.split(Linear(hidden_dim * 3,  bias=self.qkv_bias)(array), 3, axis=-1)
         q, k, v = map(lambda a: rearrange(a, "b n (h d) -> b h n d", h=self.num_heads), (q, k, v))
-        
+
         if self.rotary_base:
             rope = Rotary(self.rotary_base, cls_index=self.cls_index, mask_cls=True)
             q = rope(q, pos_offset=0)
@@ -359,7 +228,7 @@ class Attention(nn.Module):
             attn_weights = attn_weights + apply_bias
         attn_weights = nn.softmax(attn_weights, axis=-1)
 
-        attn_weights = nn.Dropout(rate=self.dropout_rate)(attn_weights, deterministic=self.deterministic)
+        attn_weights = nn.Dropout(rate=self.dropout_rate)(attn_weights, deterministic=deterministic)
         out = jnp.einsum("b h i j, b h j d -> b h i d", attn_weights, v)
         out = rearrange(out, "b h n d -> b n (h d)")
 

@@ -15,17 +15,15 @@ class VisionTransformer(nn.Module):
     return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
+    deterministic : bool = False
 
     @nn.compact
     def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
         image = batch[self.img_key]
 
-        image = ConvStemPatchify(hidden_dim=self.hidden_dim, strides=self.strides)(image)
-        if self.add_cls_token:
-            B, N, D = image.shape
-            cls = self.param("cls", nn.initializers.zeros, (1, 1, D))
-            image = jnp.concatenate([jnp.tile(cls, (B, 1, 1)), image], axis=1)
-        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.img_key, self.return_key, self.dropout_rate)({self.img_key : image})[self.return_key]
+        patch_size = (image.shape[-2]//self.num_patches), (image.shape[-3]//self.num_patches)
+        image = PatchEmbedding(self.hidden_dim, patch_size=patch_size)(image)
+        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.img_key, self.return_key, self.dropout_rate, deterministic=self.deterministic)({self.img_key : image})[self.return_key]
 
         if self.pool:
             if self.use_cls:
@@ -46,12 +44,13 @@ class SequenceTransformer(nn.Module):
     return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
+    deterministic : bool = False
 
     @nn.compact
     def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
         array = batch[self.arr_key]
         array = nn.Embed(self.num_embeddings, self.hidden_dim)(array)
-        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.arr_key, self.return_key, self.dropout_rate)({self.arr_key : array})[self.return_key]
+        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.arr_key, self.return_key, self.dropout_rate, deterministic=self.deterministic)({self.arr_key : array})[self.return_key]
 
         image = Linear(self.num_embeddings)(array)
         image = Norm("layer")(image)
@@ -66,18 +65,24 @@ class Transformer(nn.Module):
     return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
+    deterministic : bool = False
 
     @nn.compact
     def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
         array = batch[self.arr_key]
 
         for depth in range(self.num_layers):
-            array = Norm("layer")(array)
-            array = Attention(self.num_heads, qkv_bias=self.qkv_bias, dropout_rate=self.dropout_rate)(array) + array
-            array = LayerScale()(array)
-            array = DropPath(depth * 0.1)(array)
-            array = Norm("layer")(array)
-            array = MLP(self.hidden_dim*4, activation=self.activation, dropout_rate=self.dropout_rate)(array) + array
-            array = LayerScale()(array)
-            array = DropPath(depth * 0.1)(array)
+            drop_path_rate = max(0.2, depth * 0.01)
+
+            res = Norm("layer")(array)
+            res = Attention(self.num_heads, qkv_bias=self.qkv_bias, dropout_rate=self.dropout_rate)(res, deterministic=self.deterministic)
+            res = LayerScale()(res)
+            res = DropPath(drop_path_rate)(res, deterministic=self.deterministic)
+            array += res
+
+            res = Norm("layer")(array)
+            res = MLP(self.hidden_dim*4, activation=self.activation, dropout_rate=self.dropout_rate)(res, deterministic=self.deterministic)
+            res = LayerScale()(res)
+            res = DropPath(drop_path_rate)(res, deterministic=self.deterministic)
+            array += res
         return {self.return_key : array}
