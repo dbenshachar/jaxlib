@@ -72,11 +72,7 @@ def train(state : train_state.TrainState, train_loader : DataLoader, epochs : in
 
     for epoch in range(1, epochs+1):
         for step, batch in enumerate(train_loader):
-            img, label = batch
-            img, label = img.numpy(), label.numpy()
-            img, label = einops.rearrange(img, "b h w -> b h w 1"), einops.rearrange(label, "b -> b")
-            batch = {"array" : img, "target" : label, "train" : True}
-
+            batch["train"] = True
             rng, step_rng = jax.random.split(rng)
             state, metrics = train_step(state, batch, rng=step_rng)
             losses.append(metrics["loss"])
