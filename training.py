@@ -39,17 +39,17 @@ def compute_metrics(logits: jnp.ndarray, labels: jnp.ndarray, loss: Optional[flo
         res["loss"] = loss
     return res
 
-def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None, *args : Any, **kwargs : Any,) -> jnp.ndarray:
     if rng is None:
-        logits = apply_fn({"params": params}, batch)
+        logits = apply_fn({"params": params}, batch, *args, **kwargs)
     else:
-        logits = apply_fn({"params": params}, batch, rngs={"dropout": rng})
-    return logits[result_key], batch["target"]
+        logits = apply_fn({"params": params}, batch, rngs={"dropout": rng}, *args, **kwargs)
+    return logits[result_key]
 
 @jax.jit
-def train_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray], rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
+def train_step(state: train_state.TrainState, data: jnp.ndarray, target : jnp.ndarray, rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
     def loss_fn(p) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-        logits, target = forward(p, state.apply_fn, batch, rng=rng)
+        logits = forward(p, state.apply_fn, data, rng=rng)
         loss = loss_calc(logits, target)
         return loss, (logits, target)
 
@@ -72,9 +72,9 @@ def train(state : train_state.TrainState, train_loader : DataLoader, epochs : in
 
     for epoch in range(1, epochs+1):
         for step, batch in enumerate(train_loader):
-            batch["train"] = True
+            data, target = batch
             rng, step_rng = jax.random.split(rng)
-            state, metrics = train_step(state, batch, rng=step_rng)
+            state, metrics = train_step(state, data, target, rng=step_rng)
             losses.append(metrics["loss"])
 
             if step % log_every == 0:

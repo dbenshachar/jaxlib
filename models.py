@@ -11,19 +11,15 @@ class VisionTransformer(nn.Module):
     pool : bool = False
     num_classes : int =  1
     activation : ModuleType = GeGLU()
-    img_key : str = "array"
-    return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
     deterministic : bool = False
 
     @nn.compact
-    def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        image = batch[self.img_key]
-
+    def __call__(self, image : jnp.ndarray) -> jnp.ndarray:
         patch_size = (image.shape[-2]//self.num_patches), (image.shape[-3]//self.num_patches)
         image = PatchEmbedding(self.hidden_dim, patch_size=patch_size)(image)
-        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.img_key, self.return_key, self.dropout_rate, deterministic=self.deterministic)({self.img_key : image})[self.return_key]
+        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.dropout_rate, deterministic=self.deterministic)(image)
 
         if self.pool:
             if self.use_cls:
@@ -32,7 +28,7 @@ class VisionTransformer(nn.Module):
                 image = image.mean(axis=1)
             image = Linear(self.num_classes if self.pool else image.shape[-1])(image)
         image = Norm("layer")(image)
-        return {self.return_key : image}
+        return image
     
 class SequenceTransformer(nn.Module):
     num_embeddings : int
@@ -40,37 +36,30 @@ class SequenceTransformer(nn.Module):
     num_heads : int = 16
     num_layers : int = 6
     activation : ModuleType = GeGLU()
-    arr_key : str = "array"
-    return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
     deterministic : bool = False
 
     @nn.compact
-    def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        array = batch[self.arr_key]
+    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
         array = nn.Embed(self.num_embeddings, self.hidden_dim)(array)
-        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.arr_key, self.return_key, self.dropout_rate, deterministic=self.deterministic)({self.arr_key : array})[self.return_key]
+        image = Transformer(self.hidden_dim, self.num_heads, self.num_layers, self.activation, self.dropout_rate, deterministic=self.deterministic)(array)
 
         image = Linear(self.num_embeddings)(array)
         image = Norm("layer")(image)
-        return {self.return_key : image}
+        return image
 
 class Transformer(nn.Module):
     hidden_dim : int = 1024
     num_heads : int = 16
     num_layers : int = 6
     activation : ModuleType = GeGLU()
-    arr_key : str = "array"
-    return_key : str = "result"
     dropout_rate : float = 0.1
     qkv_bias : bool = True
     deterministic : bool = False
 
     @nn.compact
-    def __call__(self, batch : Dict[str, jnp.ndarray]) -> Dict[str, jnp.ndarray]:
-        array = batch[self.arr_key]
-
+    def __call__(self, array : jnp.ndarray) -> jnp.ndarray:
         for depth in range(self.num_layers):
             drop_path_rate = max(0.2, depth * 0.01)
 
@@ -85,4 +74,4 @@ class Transformer(nn.Module):
             res = LayerScale()(res)
             res = DropPath(drop_path_rate)(res, deterministic=self.deterministic)
             array += res
-        return {self.return_key : array}
+        return array
