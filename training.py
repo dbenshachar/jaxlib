@@ -30,9 +30,6 @@ def create_train_state(model : nn.Module, optimizer : optax.GradientTransformati
     params = model.init(jax.random.PRNGKey(rng), sample_input)["params"]
     return train_state.TrainState(0, apply_fn=model.apply, params=params, tx=optimizer, opt_state=optimizer.init(params))
 
-
-result_key = "result"
-
 def compute_metrics(logits: jnp.ndarray, labels: jnp.ndarray, loss: Optional[float] = None) -> Dict[str, float]:
     res = {}
     if loss is not None:
@@ -44,7 +41,7 @@ def forward(params, apply_fn, batch, rng: Optional[jax.Array] = None, *args : An
         logits = apply_fn({"params": params}, batch, *args, **kwargs)
     else:
         logits = apply_fn({"params": params}, batch, rngs={"dropout": rng}, *args, **kwargs)
-    return logits[result_key]
+    return logits
 
 @jax.jit
 def train_step(state: train_state.TrainState, data: jnp.ndarray, target : jnp.ndarray, rng: Optional[jax.Array] = None) -> Tuple[train_state.TrainState, Dict[str, float]]:
