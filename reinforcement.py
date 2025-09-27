@@ -1,0 +1,162 @@
+from dataclasses import dataclass
+import jax
+import jax.numpy as jnp
+from flax import struct
+from flax import core
+import flax
+from flax.training import train_state
+import flax.linen as nn
+import optax
+from typing import Literal, Callable, Any
+from training import *
+import numpy as np
+
+@dataclass
+class Batch:
+    obs : jax.Array
+    actions : jax.Array
+    rewards : jax.Array
+    next_obs : jax.Array
+    dones : jax.Array
+
+class ReplayBuffer:    
+    def __init__(self, capacity: int, obs_dim: int):
+        self.capacity = capacity
+        self.obs_dim = obs_dim
+        self.ptr = 0
+        self.size = 0
+        
+        self.obs = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.actions = np.zeros(capacity, dtype=np.int32)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_obs = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=bool)
+    
+    def add(self, obs: np.ndarray, action: int, reward: float, next_obs: np.ndarray, done: bool):
+        self.obs[self.ptr] = obs
+        self.actions[self.ptr] = action
+        self.rewards[self.ptr] = reward
+        self.next_obs[self.ptr] = next_obs
+        self.dones[self.ptr] = done
+        
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+    
+    def sample(self, batch_size: int, rng: jax.Array) -> Batch:
+        if self.size < batch_size:
+            raise ValueError(f"Can't sample {batch_size} from buffer with only {self.size} samples")
+        
+        indices = jax.random.choice(rng, self.size, shape=(batch_size,), replace=False)
+        indices = np.array(indices)
+        
+        return Batch(
+            obs=jnp.array(self.obs[indices]),
+            actions=jnp.array(self.actions[indices]),
+            rewards=jnp.array(self.rewards[indices]),
+            next_obs=jnp.array(self.next_obs[indices]),
+            dones=jnp.array(self.dones[indices])
+        )
+    
+    def __len__(self):
+        return self.size
+
+class DoubleDeepQNetwork:
+    model_constructor : Callable[[int], nn.Module]
+    obs_dim : int
+    n_actions : int
+    lr : float = 3e-4
+    optimizer_type : Literal["adam", "adamw", "sgd"]
+    decay_type : Literal["constant", "decay"] = "constant"
+        
+    @struct.dataclass
+    class DDQNState(train_state.TrainState):
+        target_params: core.FrozenDict
+
+    def create_state(self, rng : jax.Array) -> DDQNState:
+        self.model = self.model_constructor(self.n_actions)
+        params = self.model.init(rng, jnp.zeros((1, self.obs_dim)))["params"]
+        tx = make_optimizer(self.optimizer_type, self.decay_type, self.lr)
+        return self.DDQNState.create(apply_fn=self.model.apply, params=params, tx=tx, target_params=params)
+    
+    def soft_update(self, target, online, tau : float):
+        return jax.tree_util.tree_map(lambda t, o: (1.0 - tau) * t + tau * o, target, online)
+    
+    @jax.jit
+    def train_step(self, state: DDQNState, batch : Batch, gamma: float, tau: float) -> DDQNState:
+        def loss_fn(params):
+            q = state.apply_fn({"params": params}, batch.obs)
+            q_a = jnp.take_along_axis(q, batch.actions[..., None], axis=1).squeeze(-1)
+            next_q_online = state.apply_fn({"params": params}, batch.next_obs)
+            next_act = jnp.argmax(next_q_online, axis=1)
+            next_q_target = state.apply_fn({"params": state.target_params}, batch.next_obs)
+            next_q = jnp.take_along_axis(next_q_target, next_act[..., None], axis=1).squeeze(-1)
+            target = batch.rewards + gamma * (1.0 - batch.dones) * next_q
+            loss = jnp.mean(optax.huber_loss(q_a, target, delta=1.0))
+            return loss
+
+        grads = jax.grad(loss_fn)(state.params)
+        updates, new_opt_state = state.tx.update(grads, state.opt_state, params=state.params)
+        new_params = optax.apply_updates(state.params, updates)
+        new_target = self.soft_update(state.target_params, new_params, tau)
+        new_state = state.replace(params=new_params, opt_state=new_opt_state, target_params=new_target)
+        return new_state
+
+    def select_action_with_n(self, state: DDQNState, obs_np, eps: float, rng : jax.Array) -> jax.Array:
+        if jax.random.uniform(key=rng, shape=[1,]).item() < eps:
+            return jax.random.randint(key=rng, shape=[1,], minval=0, maxval=self.n_actions)
+        q = state.apply_fn({"params": state.params}, jnp.asarray(obs_np)[None, :])
+        return jnp.argmax(q, axis=1)
+    
+    def train_ddqn(
+        self,
+        env,
+        total_timesteps: int = 100_000,
+        buffer_size: int = 10_000,
+        batch_size: int = 32,
+        learning_starts: int = 1000,
+        train_freq: int = 4,
+        target_update_freq: int = 1000,
+        gamma: float = 0.99,
+        tau: float = 1.0,
+        eps_start: float = 1.0,
+        eps_end: float = 0.05,
+        eps_decay_steps: int = 50_000,
+        rng_seed: int = 42
+    ) -> DDQNState:       
+        rng = jax.random.PRNGKey(rng_seed)
+        rng, init_rng = jax.random.split(rng)
+        
+        state = self.create_state(init_rng)
+        buffer = ReplayBuffer(buffer_size, self.obs_dim)
+        
+        obs, _ = env.reset()
+        episode_reward = 0
+        episode_count = 0
+        
+        for step in range(total_timesteps):
+            eps = max(eps_end, eps_start - (eps_start - eps_end) * step / eps_decay_steps)
+            
+            rng, action_rng = jax.random.split(rng)
+            action = self.select_action_with_n(state, obs, eps, action_rng)
+            action = int(action.item())
+            
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            
+            buffer.add(obs, action, reward, next_obs, done)
+            episode_reward += reward
+            obs = next_obs
+            
+            if done:
+                obs, _ = env.reset()
+                episode_count += 1
+                if episode_count % 100 == 0:
+                    print(f"Episode {episode_count}, Step {step}, Reward: {episode_reward:.2f}, Eps: {eps:.3f}")
+                episode_reward = 0
+            
+            if step >= learning_starts and step % train_freq == 0 and len(buffer) >= batch_size:
+                rng, sample_rng = jax.random.split(rng)
+                batch = buffer.sample(batch_size, sample_rng)
+                update_tau = tau if tau < 1.0 else (1.0 if step % target_update_freq == 0 else 0.0)
+                state = self.train_step(state, batch, gamma, update_tau)
+        return state
