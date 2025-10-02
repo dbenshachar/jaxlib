@@ -136,10 +136,15 @@ class DoubleDeepQNetwork:
         return new_state
 
     def select_action_with_n(self, state: DDQNState, obs_np, eps: float, rng : jax.Array) -> jax.Array:
-        if jax.random.uniform(key=rng, shape=[1,]).item() < eps:
-            return jax.random.randint(key=rng, shape=[1,], minval=0, maxval=self.n_actions)
-        q = state.apply_fn({"params": state.params}, jnp.asarray(obs_np)[None, :])
-        return jnp.argmax(q, axis=1)
+        obs = jnp.asarray(obs_np)
+        n = obs.shape[0]
+        u_key, r_key = jax.random.split(rng, 2)
+        u = jax.random.uniform(key=u_key, shape=(n,))
+        q = state.apply_fn({"params": state.params}, obs)
+        greedy = jnp.argmax(q, axis=1)
+        random_a = jax.random.randint(key=r_key, shape=(n,), minval=0, maxval=self.n_actions)
+        mask = u < eps
+        return jnp.where(mask, random_a, greedy)
     
     def train(
         self,
@@ -162,36 +167,55 @@ class DoubleDeepQNetwork:
         rng = jax.random.PRNGKey(rng_seed)
         rng, init_rng = jax.random.split(rng)
         state = self.create_state(init_rng)
+
         obs, _ = env.reset()
-        episode_reward = 0
+        obs = jnp.asarray(obs)
+        num_envs = obs.shape[0]
+        episode_reward = jnp.zeros((num_envs,), dtype=jnp.float32)
         episode_count = 0
         episode_rewards = []
-        
+
         for step in range(total_timesteps):
             eps = max(eps_end, eps_start - (eps_start - eps_end) * step / eps_decay_steps)
             rng, action_rng = jax.random.split(rng)
             action = self.select_action_with_n(state, obs, eps, action_rng)
-            action = int(action.item())
-            next_obs, reward, terminated, truncated, _ = env.step(action)
-            done = terminated or truncated
-            buffer.add(obs, action, reward, next_obs, done)
-            episode_reward += reward
+
+            next_obs, reward, terminated, truncated, _ = env.step(action.tolist())
+            next_obs = jnp.asarray(next_obs)
+            reward = jnp.asarray(reward, dtype=jnp.float32)
+            terminated = jnp.asarray(terminated)
+            truncated = jnp.asarray(truncated)
+            done = jnp.logical_or(terminated, truncated)
+
+            for i in range(len(done)):
+                buffer.add(
+                    obs[i], # pyright: ignore[reportArgumentType]
+                    int(action[i].item()),
+                    float(reward[i].item()),
+                    next_obs[i], # pyright: ignore[reportArgumentType]
+                    bool(done[i].item())
+                )
+
+            episode_reward = episode_reward + reward
+            for i in range(len(done)):
+                if bool(done[i].item()):
+                    episode_rewards.append(float(episode_reward[i].item()))
+                    episode_count += 1
+
+            episode_reward = jnp.where(done, 0.0, episode_reward)
             obs = next_obs
-            
-            if done:
-                episode_rewards.append(episode_reward)
-                episode_count += 1
-                obs, _ = env.reset()
-                episode_reward = 0
-                
+
             if step % 1000 == 0:
-                recent_rewards = episode_rewards[-100:] if episode_rewards else [0]
-                avg_reward = sum(recent_rewards) / len(recent_rewards)
-                print(f"Step {step} | Episodes: {episode_count} | Avg Reward: {avg_reward:.2f}, Eps: {eps:.3f}")
+                if episode_rewards:
+                    recent_rewards = episode_rewards[-100:]
+                    avg_reward = float(jnp.mean(jnp.array(recent_rewards)).item())
+                else:
+                    avg_reward = 0.0
+                print(f"Step {step} | Episodes: {episode_count} | Avg Reward: {avg_reward:.2f} | Eps: {eps:.3f}")
                 
             if step % eval_freq == 0 and step > 0:
                 rng, eval_rng = jax.random.split(rng)
-                eval_reward = self.evaluate(env, state, rng, eval_episodes)
+                eval_reward = self.evaluate(env, state, eval_rng, eval_episodes)
                 print(f"Eval Step {step}: {eval_reward:.2f}")
                 
             if step >= learning_starts and step % train_freq == 0 and len(buffer) >= batch_size:
@@ -203,16 +227,20 @@ class DoubleDeepQNetwork:
         return state
 
     def evaluate(self, env, state, rng, num_episodes: int = 5) -> float:
-        total_reward = 0
-        for _ in range(num_episodes):
-            obs, _ = env.reset()
-            episode_reward = 0
-            while True:
-                action = self.select_action_with_n(state, obs, 0.0, rng)
-                action = int(action.item())
-                obs, reward, terminated, truncated, _ = env.step(action)
-                episode_reward += reward
-                if terminated or truncated:
-                    break
-            total_reward += episode_reward
-        return total_reward / num_episodes
+        obs, _ = env.reset()
+        obs = jnp.asarray(obs)
+        num_envs = obs.shape[0]
+        ep_returns = jnp.zeros((num_envs,), dtype=jnp.float32)
+        completed = []
+        while len(completed) < num_episodes:
+            action = self.select_action_with_n(state, obs, 0.0, rng)
+            obs, reward, terminated, truncated, _ = env.step(action.tolist())
+            obs = jnp.asarray(obs)
+            reward = jnp.asarray(reward, dtype=jnp.float32)
+            done = jnp.logical_or(jnp.asarray(terminated), jnp.asarray(truncated))
+            ep_returns = ep_returns + reward
+            for i in range(num_envs):
+                if bool(done[i].item()):
+                    completed.append(float(ep_returns[i].item()))
+                    ep_returns = ep_returns.at[i].set(0.0)
+        return float(jnp.mean(jnp.array(completed[:num_episodes])).item())
