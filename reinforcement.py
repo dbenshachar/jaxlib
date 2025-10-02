@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
@@ -10,8 +11,21 @@ import optax
 from typing import Literal, Callable, Any
 from training import *
 import numpy as np
+import gymnasium as gym
+from gymnasium.vector import SyncVectorEnv
 
-@dataclass
+def make_env(seed, name : str, max_episode_steps : int = 500):
+    def thunk():
+        env = gym.make(name, max_episode_steps=max_episode_steps)
+        env.reset(seed=seed)
+        return env
+    return thunk
+
+def parallelize_env(num_envs, name : str, max_episode_steps : int = 500):
+    env = SyncVectorEnv([make_env(seed, name, max_episode_steps=max_episode_steps) for seed in range(num_envs)])
+    return env
+
+@struct.dataclass
 class Batch:
     obs : jax.Array
     actions : jax.Array
@@ -19,7 +33,24 @@ class Batch:
     next_obs : jax.Array
     dones : jax.Array
 
-class ReplayBuffer:    
+class ReplayBuffer(ABC):
+    @abstractmethod
+    def __init__(self, capacity: int, obs_dim: int):
+        ...
+    
+    @abstractmethod
+    def add(self, obs: np.ndarray, action: int, reward: float, next_obs: np.ndarray, done: bool):
+        pass
+
+    @abstractmethod
+    def sample(self, batch_size: int, rng: jax.Array) -> Batch:
+        ...
+
+    def __len__(self) -> int:
+        ...
+
+
+class CircularReplayBuffer(ReplayBuffer):    
     def __init__(self, capacity: int, obs_dim: int):
         self.capacity = capacity
         self.obs_dim = obs_dim
@@ -60,12 +91,13 @@ class ReplayBuffer:
     def __len__(self):
         return self.size
 
+@dataclass
 class DoubleDeepQNetwork:
     model_constructor : Callable[[int], nn.Module]
     obs_dim : int
     n_actions : int
     lr : float = 3e-4
-    optimizer_type : Literal["adam", "adamw", "sgd"]
+    optimizer_type : Literal["adam", "adamw", "sgd"] = "adam"
     decay_type : Literal["constant", "decay"] = "constant"
         
     @struct.dataclass
@@ -78,11 +110,13 @@ class DoubleDeepQNetwork:
         tx = make_optimizer(self.optimizer_type, self.decay_type, self.lr)
         return self.DDQNState.create(apply_fn=self.model.apply, params=params, tx=tx, target_params=params)
     
-    def soft_update(self, target, online, tau : float):
+    @staticmethod
+    def soft_update(target, online, tau : float):
         return jax.tree_util.tree_map(lambda t, o: (1.0 - tau) * t + tau * o, target, online)
     
+    @staticmethod
     @jax.jit
-    def train_step(self, state: DDQNState, batch : Batch, gamma: float, tau: float) -> DDQNState:
+    def train_step(state: DDQNState, batch : Batch, gamma: float, tau: float) -> DDQNState:
         def loss_fn(params):
             q = state.apply_fn({"params": params}, batch.obs)
             q_a = jnp.take_along_axis(q, batch.actions[..., None], axis=1).squeeze(-1)
@@ -97,7 +131,7 @@ class DoubleDeepQNetwork:
         grads = jax.grad(loss_fn)(state.params)
         updates, new_opt_state = state.tx.update(grads, state.opt_state, params=state.params)
         new_params = optax.apply_updates(state.params, updates)
-        new_target = self.soft_update(state.target_params, new_params, tau)
+        new_target = DoubleDeepQNetwork.soft_update(state.target_params, new_params, tau)
         new_state = state.replace(params=new_params, opt_state=new_opt_state, target_params=new_target)
         return new_state
 
@@ -107,11 +141,11 @@ class DoubleDeepQNetwork:
         q = state.apply_fn({"params": state.params}, jnp.asarray(obs_np)[None, :])
         return jnp.argmax(q, axis=1)
     
-    def train_ddqn(
+    def train(
         self,
         env,
+        buffer : ReplayBuffer,
         total_timesteps: int = 100_000,
-        buffer_size: int = 10_000,
         batch_size: int = 32,
         learning_starts: int = 1000,
         train_freq: int = 4,
@@ -120,43 +154,65 @@ class DoubleDeepQNetwork:
         tau: float = 1.0,
         eps_start: float = 1.0,
         eps_end: float = 0.05,
-        eps_decay_steps: int = 50_000,
-        rng_seed: int = 42
-    ) -> DDQNState:       
+        eps_decay_steps: int = 80_000,
+        rng_seed: int = 42,
+        eval_freq: int = 10_000,
+        eval_episodes: int = 5
+        ) -> DDQNState:
         rng = jax.random.PRNGKey(rng_seed)
         rng, init_rng = jax.random.split(rng)
-        
         state = self.create_state(init_rng)
-        buffer = ReplayBuffer(buffer_size, self.obs_dim)
-        
         obs, _ = env.reset()
         episode_reward = 0
         episode_count = 0
+        episode_rewards = []
         
         for step in range(total_timesteps):
             eps = max(eps_end, eps_start - (eps_start - eps_end) * step / eps_decay_steps)
-            
             rng, action_rng = jax.random.split(rng)
             action = self.select_action_with_n(state, obs, eps, action_rng)
             action = int(action.item())
-            
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
-            
             buffer.add(obs, action, reward, next_obs, done)
             episode_reward += reward
             obs = next_obs
             
             if done:
-                obs, _ = env.reset()
+                episode_rewards.append(episode_reward)
                 episode_count += 1
-                if episode_count % 100 == 0:
-                    print(f"Episode {episode_count}, Step {step}, Reward: {episode_reward:.2f}, Eps: {eps:.3f}")
+                obs, _ = env.reset()
                 episode_reward = 0
-            
+                
+            if step % 1000 == 0:
+                recent_rewards = episode_rewards[-100:] if episode_rewards else [0]
+                avg_reward = sum(recent_rewards) / len(recent_rewards)
+                print(f"Step {step} | Episodes: {episode_count} | Avg Reward: {avg_reward:.2f}, Eps: {eps:.3f}")
+                
+            if step % eval_freq == 0 and step > 0:
+                rng, eval_rng = jax.random.split(rng)
+                eval_reward = self.evaluate(env, state, rng, eval_episodes)
+                print(f"Eval Step {step}: {eval_reward:.2f}")
+                
             if step >= learning_starts and step % train_freq == 0 and len(buffer) >= batch_size:
                 rng, sample_rng = jax.random.split(rng)
                 batch = buffer.sample(batch_size, sample_rng)
                 update_tau = tau if tau < 1.0 else (1.0 if step % target_update_freq == 0 else 0.0)
-                state = self.train_step(state, batch, gamma, update_tau)
+                state = DoubleDeepQNetwork.train_step(state, batch, gamma, update_tau)
+                
         return state
+
+    def evaluate(self, env, state, rng, num_episodes: int = 5) -> float:
+        total_reward = 0
+        for _ in range(num_episodes):
+            obs, _ = env.reset()
+            episode_reward = 0
+            while True:
+                action = self.select_action_with_n(state, obs, 0.0, rng)
+                action = int(action.item())
+                obs, reward, terminated, truncated, _ = env.step(action)
+                episode_reward += reward
+                if terminated or truncated:
+                    break
+            total_reward += episode_reward
+        return total_reward / num_episodes
