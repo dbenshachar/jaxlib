@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jaxfn"
+version = "0.1.0"
+description = "JAX models/modules/reinforcement/training"
+readme = "README.md"   # make sure this file exists
+requires-python = ">=3.9"
+dependencies = []      # add real deps later
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaxfn"]

@@ -1,5 +1,5 @@
 from typing import Any
-from modules import *
+from .modules import *
 
 class VisionTransformer(nn.Module):
     hidden_dim : int = 1024

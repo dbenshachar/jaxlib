@@ -2,7 +2,7 @@ from typing import Dict
 import jax
 import jax.numpy as jnp
 
-from modules import *
+from .modules import *
 from flax.training import train_state
 import optax
 import einops
@@ -63,7 +63,7 @@ def eval_step(state: train_state.TrainState, batch: Dict[str, jnp.ndarray]):
     logits, target = forward(state.params, state.apply_fn, batch, rng=None)
     return compute_metrics(logits, target)
 
-def train(state : train_state.TrainState, train_loader : DataLoader, epochs : int = 20, num_logs : int = 20, rng : jnp.ndarray = jax.random.PRNGKey(42)):
+def train(state : train_state.TrainState, train_loader : DataLoader, rng : jnp.ndarray, epochs : int = 20, num_logs : int = 20):
     losses = []
     log_every = len(train_loader) // num_logs
 

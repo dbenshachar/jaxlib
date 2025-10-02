@@ -9,7 +9,8 @@ from flax.training import train_state
 import flax.linen as nn
 import optax
 from typing import Literal, Callable, Any
-from training import *
+from .modules import *
+from .training import *
 import numpy as np
 import gymnasium as gym
 from gymnasium.vector import SyncVectorEnv
