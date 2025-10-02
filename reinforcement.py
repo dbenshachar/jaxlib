@@ -49,6 +49,116 @@ class ReplayBuffer(ABC):
     def __len__(self) -> int:
         ...
 
+class PERReplayBuffer(ReplayBuffer):
+    def __init__(self, capacity: int, obs_dim: int, alpha: float = 0.6, beta: float = 0.4, eps: float = 1e-6) -> None:
+        self.capacity = capacity
+        self.obs_dim = obs_dim
+        self.ptr = 0
+        self.size = 0
+        self.obs = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.actions = np.zeros(capacity, dtype=np.int32)
+        self.rewards = np.zeros(capacity, dtype=np.float32)
+        self.next_obs = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.dones = np.zeros(capacity, dtype=bool)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.eps = float(eps)
+        self.priorities = np.zeros(capacity, dtype=np.float32)
+        self.max_priority = 1.0
+        self._last_indices: Union[jax.Array, None] = None
+        self._last_weights: Union[jax.Array, None] = None
+
+    def set_beta(self, beta: float) -> None:
+        self.beta = float(beta)
+
+    def _as_batch(self, x: Union[np.ndarray, jax.Array, int, float, bool], name: str) -> np.ndarray:
+        x = np.asarray(x)
+        if name in ("obs", "next_obs"):
+            if x.ndim == 1:
+                x = x.reshape(1, -1)
+            elif not (x.ndim == 2 and x.shape[1] == self.obs_dim):
+                raise ValueError(f"{name} must have shape (obs_dim,) or (N, obs_dim), got {x.shape}")
+        else:
+            if x.ndim == 0:
+                x = x.reshape(1)
+            elif x.ndim != 1:
+                raise ValueError(f"{name} must be scalar or (N,), got {x.shape}")
+        return x
+
+    def add(self, obs: np.ndarray, action: Union[int, np.ndarray], reward: Union[float, np.ndarray], next_obs: np.ndarray, done: Union[bool, np.ndarray]) -> None:
+        obs = self._as_batch(obs, "obs").astype(np.float32)
+        next_obs = self._as_batch(next_obs, "next_obs").astype(np.float32)
+        actions = self._as_batch(action, "actions").astype(np.int32)
+        rewards = self._as_batch(reward, "rewards").astype(np.float32)
+        dones = self._as_batch(done, "dones").astype(bool)
+        n = obs.shape[0]
+        if not (actions.shape[0] == rewards.shape[0] == dones.shape[0] == n and next_obs.shape[0] == n):
+            raise ValueError("Inconsistent batch sizes in add() inputs.")
+        idxs = (np.arange(n, dtype=np.int64) + self.ptr) % self.capacity
+        self.obs[idxs] = obs
+        self.actions[idxs] = actions
+        self.rewards[idxs] = rewards
+        self.next_obs[idxs] = next_obs
+        self.dones[idxs] = dones
+        self.priorities[idxs] = self.max_priority
+        self.ptr = int((self.ptr + n) % self.capacity)
+        self.size = int(min(self.size + n, self.capacity))
+
+    def _probs(self) -> jnp.ndarray:
+        if self.size == 0:
+            raise ValueError("Buffer is empty.")
+        prios = jnp.array(self.priorities[:self.size]) + self.eps
+        prios = jnp.power(prios, self.alpha)
+        return prios / jnp.sum(prios)
+
+    def _compute_weights(self, indices: jnp.ndarray, probs: jnp.ndarray) -> jnp.ndarray:
+        N = float(self.size)
+        p_i = probs[indices]
+        weights = jnp.power(N * p_i, -self.beta)
+        return weights / (jnp.max(weights) + 1e-8)
+
+    def sample(self, batch_size: int, rng: jax.Array) -> Batch:
+        batch, _, _ = self.sample_with_info(batch_size, rng)
+        return batch
+
+    def sample_with_info(self, batch_size: int, rng: jax.Array) -> Tuple[Batch, jax.Array, jax.Array]:
+        if self.size < batch_size:
+            raise ValueError(f"Can't sample {batch_size} from buffer with only {self.size} samples")
+        probs = self._probs()
+        candidates = jnp.arange(self.size)
+        indices = jax.random.choice(rng, candidates, shape=(batch_size,), replace=False, p=probs)
+        weights = self._compute_weights(indices, probs)
+        idx_np = np.array(indices)
+        batch = Batch(
+            obs=jnp.array(self.obs[idx_np]),
+            actions=jnp.array(self.actions[idx_np]),
+            rewards=jnp.array(self.rewards[idx_np]),
+            next_obs=jnp.array(self.next_obs[idx_np]),
+            dones=jnp.array(self.dones[idx_np])
+        )
+        self._last_indices = indices
+        self._last_weights = weights
+        return batch, indices, weights
+
+    def last_sample_info(self) -> Tuple[jax.Array, jax.Array]:
+        if self._last_indices is None or self._last_weights is None:
+            raise RuntimeError("No prior sample; call sample_with_info(...) first.")
+        return self._last_indices, self._last_weights
+
+    def update_priorities(self, indices: Union[np.ndarray, jax.Array], new_priorities: Union[np.ndarray, jax.Array, float]) -> None:
+        idx = np.asarray(indices, dtype=np.int64)
+        pr = np.asarray(new_priorities, dtype=np.float32)
+        if pr.ndim == 0:
+            pr = np.full_like(idx, float(pr), dtype=np.float32)
+        if idx.shape[0] != pr.shape[0]:
+            raise ValueError("indices and new_priorities must have the same length.")
+        pr = np.maximum(pr, self.eps)
+        self.priorities[idx] = pr
+        self.max_priority = float(max(self.max_priority, pr.max()))
+
+    def __len__(self) -> int:
+        return self.size
+
 
 class CircularReplayBuffer(ReplayBuffer):    
     def __init__(self, capacity: int, obs_dim: int):
